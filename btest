@@ -35,6 +35,8 @@ import xml.dom.minidom
 
 from datetime import datetime
 
+from reportportal_client import ReportPortalService
+
 try:
     import ConfigParser as configparser
 except ImportError:
@@ -1665,6 +1667,108 @@ class Diag(OutputHandler):
         if self._file:
             self.output(test, "%s ... %s" % (test.displayName(), msg), True, self._file)
 
+class ReportPortalLaunch(OutputHandler):
+
+    def __init__(self, options):
+        """Output handler for reporting to ReportPortal.io endpoint
+
+        options: An optparser with global options.
+        """
+        OutputHandler.__init__(self, options)
+
+        self._name = options.rp_launch
+        self._endpoint = options.rp_endpoint
+        self._token = options.rp_token
+        self._project = options.rp_project
+        self._description = options.rp_description
+        self._attributes = options.rp_attributes or None
+
+        self._service = ReportPortalService(
+            endpoint=self._endpoint,
+            project=self._project,
+            token=self._token)
+
+    def prepare(self, mgr):
+        self._launch = self._service.start_launch(
+            name=self._name,
+            start_time=datetime.utcnow().isoformat(),
+            description=self._description,
+            attributes=self._attributes)
+
+    def getContext(self, test, context_file):
+        context = ""
+        for line in test.diagmsgs:
+            context += "  % " + line + "\n"
+
+        for f in (test.diag, os.path.join(test.tmpdir, context_file)):
+            if not f:
+                continue
+
+            if os.path.isfile(f):
+                context += "  % cat " + os.path.basename(f) + "\n"
+                for line in open(f):
+                    context += "  " + line.strip() + "\n"
+
+        return context
+
+
+    def testStart(self, test):
+        """Called just before a test begins."""
+
+        item_id = self._service.start_test_item(
+                    name=test.displayName(),
+                    description="\n".join(test.doc),
+                    start_time=datetime.utcnow().isoformat(),
+                    item_type="TEST"
+                )
+
+        test.item_id = item_id
+
+
+    def testCommand(self, test, cmdline):
+        """Called just before a command line is exected for a trace."""
+
+    def testProgress(self, test, msg):
+        """Called when a test signals having made progress."""
+
+    def testSucceeded(self, test, msg):
+        """Called when a test was successful."""
+        self._service.finish_test_item(end_time=datetime.utcnow().isoformat(),
+            item_id=test.item_id,
+            status="PASSED")
+
+    def testFailed(self, test, msg):
+        """Called when a test failed."""
+
+        context = self.getContext(test, ".stderr")
+
+        self._service.log(datetime.utcnow().isoformat(), context, "INFO", item_id=test.item_id)
+        self._service.finish_test_item(end_time=datetime.utcnow().isoformat(),
+            item_id=test.item_id,
+            status="FAILED")
+
+    def testSkipped(self, test, msg):
+        """Called when a test is skipped because its dependencies aren't met."""
+        self._service.finish_test_item(end_time=datetime.utcnow().isoformat(),
+            item_id=test.item_id,
+            status="SKIPPED")
+
+    def testFinished(self, test, msg):
+        """
+        Called just after a test has finished being processed, independent of
+        success or failure. Not called for skipped tests.
+        """
+        self._service.finish_launch(end_time=datetime.utcnow().isoformat())
+
+    def testUnstable(self, test, msg):
+        """Called when a test failed initially but succeeded in a retry."""
+
+    def finished(self):
+        """Called when all tests have been executed."""
+        self._service.terminate()
+
+
+
 class SphinxOutput(OutputHandler):
     def __init__(self, options, all=False, file=None):
         """Output handler for producing output when running from
@@ -1743,15 +1847,12 @@ class XMLReport(OutputHandler):
         OutputHandler.__init__(self, options)
         self._file = xmlfile
         self._start = time.time()
-        self._timestamp = datetime.now().isoformat()
+        self._timestamp = datetime.utcnow().isoformat()
 
     def prepare(self, mgr):
         self._results = mgr.list([])
 
     def testStart(self, test):
-        pass
-
-    def testCommand(self, test, cmdline):
         pass
 
     def makeTestCaseElement(self, doc, testsuite, name, duration):
@@ -2257,6 +2358,14 @@ optparser.add_option("--trace-file", action="store", dest="tracefile", default="
 optparser.add_option("-F", "--abort-on-failure", action="store_true", dest="abort_on_failure",
                      help="terminate after first test failure")
 
+# ReportPortal Integration
+optparser.add_option("--rp-endpoint", action="store", type="string", dest="rp_endpoint", default=None, help="URL to ReportPortal endpoint")
+optparser.add_option("--rp-token", action="store", type="string", dest="rp_token", default=None, help="ReportPortal API Token")
+optparser.add_option("--rp-project", action="store", type="string", dest="rp_project", default=None, help="ReportPortal Project")
+optparser.add_option("--rp-launch", action="store", type="string", dest="rp_launch", default="BTEST", help="ReportPortal Launch Name")
+optparser.add_option("--rp-attributes", action="store", type="string", dest="rp_attributes", default=None, help="ReportPortal LaunchAttributes. k/v")
+optparser.add_option("--rp-description", action="store", type="string", dest="rp_description", default="BTEST", help="ReportPortal Launch Description")
+
 optparser.set_defaults(mode="TEST")
 (Options, args) = optparser.parse_args()
 
@@ -2391,6 +2500,9 @@ if Options.tracefile:
 
     except IOError as e:
         print("cannot open %s: %s" % (Options.tracefile, e), file=sys.stderr)
+
+if Options.rp_token:
+    output_handlers += [ReportPortalLaunch(Options)]
 
 output_handler = Forwarder(Options, output_handlers)
 
